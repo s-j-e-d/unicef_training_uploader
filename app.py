@@ -4,7 +4,7 @@ import json
 import re
 import uuid
 from typing import Any, Optional, Tuple, Dict, List
-import os 
+import os
 
 import pandas as pd
 import streamlit as st
@@ -21,6 +21,7 @@ KOBO_TOKEN = os.environ.get("KOBO_TOKEN") or st.secrets.get("KOBO_TOKEN", "")
 if not KOBO_TOKEN:
     st.error("Missing KOBO_TOKEN. Add it in Streamlit Cloud → App → Settings → Secrets.")
     st.stop()
+
 ASSET_UID = "aS5UNu8wuynhJN87JYopFQ"                     # exact form asset uid
 KC_BASE = "https://kc-eu.kobotoolbox.org"               # EU KoboCAT
 SUBMIT_URL = f"{KC_BASE}/api/v1/submissions.json"       # JSON submissions
@@ -171,6 +172,64 @@ def build_submission_nested(row: pd.Series) -> Dict[str, Any]:
     return prune(submission)
 
 # -------------------------------
+# Validation
+# -------------------------------
+def is_blank(v: Any) -> bool:
+    if v is None: return True
+    if isinstance(v, float) and pd.isna(v): return True
+    s = str(v).strip()
+    return s == "" or s.lower() == "nan" or s == "NaT"
+
+REQUIRED_LABELS = {lbl for k, lbl in L.items() if k != "service_provider_other"}  # everything except "Other Service Provider..."
+
+def validate_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
+    issues: List[Dict[str, Any]] = []
+    for idx, row in df.iterrows():
+        errors: List[str] = []
+        warnings_: List[str] = []
+
+        # Requiredness: all except "Other Service Provider..."
+        for lbl in REQUIRED_LABELS:
+            if is_blank(row.get(lbl)):
+                errors.append(f"Missing: {lbl}")
+
+        # Score numeric warning (rule requires not blank already)
+        if not is_blank(row.get(L["score"])):
+            if pd.isna(pd.to_numeric(row.get(L["score"]), errors="coerce")):
+                warnings_.append("Score is not numeric")
+
+        # Helpful format warnings (non-blocking)
+        for k in ("start_mm_yyyy", "end_mm_yyyy"):
+            v = row.get(L[k])
+            if not is_blank(v) and parse_mm_yyyy(v) is None:
+                warnings_.append(f"{L[k]}: invalid mm/yyyy")
+
+        v = row.get(L["works_hf"])
+        if not is_blank(v) and normalize_yes_no(v) is None:
+            warnings_.append("Works in HF should be Yes/No (Так/Ні)")
+
+        v = row.get(L["gender"])
+        if not is_blank(v) and normalize_gender(v) is None:
+            warnings_.append("Gender not recognized")
+
+        if errors or warnings_:
+            issues.append({
+                "Row #": idx + 1,
+                "Name": row.get(L["name"]),
+                "Errors": "; ".join(errors),
+                "Warnings": "; ".join(warnings_),
+            })
+
+    if issues:
+        issues_df = pd.DataFrame(issues)
+    else:
+        issues_df = pd.DataFrame(columns=["Row #", "Name", "Errors", "Warnings"])
+
+    n_errors = sum(1 for i in issues if i["Errors"])
+    n_warnings = sum(1 for i in issues if i["Warnings"])
+    return issues_df, n_errors, n_warnings
+
+# -------------------------------
 # UI
 # -------------------------------
 st.set_page_config(page_title="Kobo Uploader (EU)", page_icon="⬆️", layout="centered")
@@ -205,12 +264,36 @@ if uploaded:
         st.subheader("Preview (first 10 rows)")
         st.dataframe(df.head(10))
 
+        # ---- Validation section ----
+        st.subheader("Validation")
+        st.caption(
+            "Rules: (1) All fields are required **except** "
+            "'Other Service Provider or Facility / Інше Місце надання послуг чи Заклад'. "
+            "(2) Score must not be blank/null."
+        )
+
+        issues_df, n_errors, n_warnings = validate_dataframe(df)
+
+        if n_errors > 0:
+            st.error(f"{n_errors} row(s) have errors. Fix and re-upload.")
+        else:
+            st.success("All rows passed required checks.")
+
+        if n_warnings > 0:
+            st.warning(f"{n_warnings} row(s) have warnings (non-blocking).")
+
+        if not issues_df.empty:
+            st.dataframe(issues_df, use_container_width=True)
+            csv = issues_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("Download validation report (CSV)", data=csv, file_name="validation_report.csv", mime="text/csv")
+
+        # Build submissions only after validation runs (we still build them; submit button is disabled if errors)
         submissions = [build_submission_nested(row) for _, row in df.iterrows()]
         st.write(f"Prepared {len(submissions)} submission(s)")
 
-        # Submit button with progress & lockout
+        # Submit button with progress & lockout (disabled if errors)
         uploading = st.session_state.get("uploading", False)
-        submit_disabled = (not submissions) or uploading
+        submit_disabled = (not submissions) or uploading or (n_errors > 0)
 
         submit_btn = st.button(
             "🚀 Submit to Kobo",
