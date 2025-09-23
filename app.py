@@ -100,6 +100,18 @@ def parse_mm_yyyy(v: Any) -> Optional[str]:
     m = re.match(r"^(\d{1,2})\s*[-/.]\s*(\d{4})$", s)
     return f"{m.group(2)}-{int(m.group(1)):02d}-01" if m else None
 
+def parse_score_int(v: Any) -> Optional[int]:
+    """Accept 0..100 as whole numbers (also tolerates '82%' or 82.0)."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    s = str(v).strip().replace("%", "")
+    try:
+        f = float(s)
+    except Exception:
+        return None
+    n = int(round(f))
+    return n if 0 <= n <= 100 else None
+
 def prune(d: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively remove empty/None/NaN/'' values but keep non-empty groups."""
     out: Dict[str, Any] = {}
@@ -133,10 +145,8 @@ def post_submission_json(asset_uid: str, submission: Dict[str, Any]) -> requests
 def build_submission_nested(row: pd.Series) -> Dict[str, Any]:
     first, second = parse_name(row.get(L["name"]))
 
-    score_val = None
-    if L["score"] in row and pd.notna(row.get(L["score"])):
-        score_val = pd.to_numeric(row.get(L["score"]), errors="coerce")
-        score_val = int(score_val) if pd.notna(score_val) else None
+    # score as integer 0..100
+    score_val = parse_score_int(row.get(L["score"]))
 
     submission = {
         "metadata": {
@@ -193,10 +203,14 @@ def validate_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
             if is_blank(row.get(lbl)):
                 errors.append(f"Missing: {lbl}")
 
-        # Score numeric warning (rule requires not blank already)
-        if not is_blank(row.get(L["score"])):
-            if pd.isna(pd.to_numeric(row.get(L["score"]), errors="coerce")):
-                warnings_.append("Score is not numeric")
+        # Score: must be an integer 0..100 (blocking)
+        sv = row.get(L["score"])
+        if is_blank(sv):
+            # already captured by requiredness above, but keep explicit message if you prefer:
+            pass
+        else:
+            if parse_score_int(sv) is None:
+                errors.append("Score must be a whole number 0–100")
 
         # Helpful format warnings (non-blocking)
         for k in ("start_mm_yyyy", "end_mm_yyyy"):
@@ -269,7 +283,7 @@ if uploaded:
         st.caption(
             "Rules: (1) All fields are required **except** "
             "'Other Service Provider or Facility / Інше Місце надання послуг чи Заклад'. "
-            "(2) Score must not be blank/null."
+            "(2) Score must be a **whole number 0–100**."
         )
 
         issues_df, n_errors, n_warnings = validate_dataframe(df)
