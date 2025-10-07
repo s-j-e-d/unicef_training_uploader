@@ -17,22 +17,33 @@ from openpyxl.utils.cell import range_boundaries
 warnings.filterwarnings("ignore", message="Data Validation extension is not supported and will be removed")
 
 # -------------------------------
-# CONFIG
+# CONFIG HELPERS
 # -------------------------------
-KOBO_TOKEN = os.environ.get("KOBO_TOKEN") or st.secrets.get("KOBO_TOKEN", "")
-if not KOBO_TOKEN:
-    st.error("Missing KOBO_TOKEN. Set it in environment or Streamlit Secrets.")
-    st.stop()
+def get_secret(name: str, default: str = "") -> str:
+    # Lookup order: env -> st.secrets -> default
+    return os.environ.get(name) or st.secrets.get(name, default)
 
-ASSET_UID = "aS5UNu8wuynhJN87JYopFQ"                 # your form UID
-KC_BASE = "https://kc-eu.kobotoolbox.org"           # EU KoboCAT
-SUBMIT_URL = f"{KC_BASE}/api/v1/submissions.json"   # JSON submissions
+# Defaults for EU
+EU_ASSET_UID = "aS5UNu8wuynhJN87JYopFQ"
+EU_SUBMIT_URL = get_secret("EU_SUBMIT_URL", "https://kc-eu.kobotoolbox.org/api/v1/submissions.json")
+# NOTE: we no longer hard-stop on KOBO_TOKEN at import time; we check after the user picks a form.
 
-FORMS = {
+FORMS: Dict[str, Dict[str, Any]] = {
     "Training Attendance (EU)": {
-        "asset_uid": ASSET_UID,
+        "asset_uid": EU_ASSET_UID,
+        "submit_url": EU_SUBMIT_URL,
+        "api_key_env": "KOBO_TOKEN",
         "landing": "https://eu.kobotoolbox.org/#/forms/aS5UNu8wuynhJN87JYopFQ/landing",
-    }
+        "auth_scheme": "Token",
+    },
+    "Training Attendance (Ruslan)": {
+        # Set these in your environment/secrets
+        "asset_uid": get_secret("RUSLAN_ASSET_UID", ""),               # REQUIRED
+        "submit_url": get_secret("RUSLAN_SUBMIT_URL", ""),             # REQUIRED
+        "api_key_env": "KOBO_TOKEN_RUSLAN",                            # REQUIRED
+        "landing": get_secret("RUSLAN_LANDING", ""),                   # optional
+        "auth_scheme": "Token",                                        # or "Bearer" if needed
+    },
 }
 
 # -------------------------------
@@ -53,7 +64,7 @@ H = {
     "parent_pchf_name": "Name of Parent PCHF",
     "ambulatory_name": "Name of Ambulatory",
 
-    "helper": "Helper",  # optional
+    "helper": "Helper",
     "service_provider_other": "Other Service Provider or Facility / Інше Місце надання послуг чи Заклад",
 
     "score": "Post-Training Test Score %",
@@ -63,7 +74,7 @@ H = {
     "place": "Place where the training is conducted",
 }
 
-# Kobo nested keys (schema)
+# (K is retained if you use it elsewhere)
 K = {
     "first_name": "personal_info/first_name",
     "second_name": "personal_info/second_name",
@@ -76,9 +87,9 @@ K = {
     "oblast": "work_location/oblast",
     "rayon": "work_location/rayon",
     "hromada": "work_location/hromada",
-    "settlement": "work_location/settlement",  # NOT in Excel -> None
-    "facility_code": "work_location/facility_code",        # PCHF name/code
-    "service_provider": "work_location/service_provider",  # Ambulatory name
+    "settlement": "work_location/settlement",
+    "facility_code": "work_location/facility_code",
+    "service_provider": "work_location/service_provider",
     "helper": "work_location/helper",
     "service_provider_other": "work_location/service_provider_other",
 
@@ -109,7 +120,6 @@ def normalize_gender(v: Any) -> Optional[str]:
     return None
 
 def parse_mm_yyyy_or_date(v: Any) -> Optional[str]:
-    """Accept Excel date / dd-mm-yyyy / dd/mm/yyyy / mm/yyyy (-> first of month). Return YYYY-MM-DD."""
     if v is None or (isinstance(v, float) and pd.isna(v)): return None
     ts = pd.to_datetime(v, errors="coerce", dayfirst=True)
     if pd.notna(ts):
@@ -125,7 +135,6 @@ def parse_mm_yyyy_or_date(v: Any) -> Optional[str]:
     return None
 
 def parse_score_int(v: Any) -> Optional[int]:
-    """Whole numbers 0..100 (also tolerate '82%' or 82.0)."""
     if v is None or (isinstance(v, float) and pd.isna(v)): return None
     s = str(v).strip().replace("%", "")
     try:
@@ -148,14 +157,16 @@ def prune(d: Dict[str, Any]) -> Dict[str, Any]:
             out[k] = v
     return out
 
-def post_submission_json(asset_uid: str, submission: Dict[str, Any]) -> requests.Response:
+def post_submission_json(submit_url: str, api_key: str, auth_scheme: str, asset_uid: str, submission: Dict[str, Any]) -> requests.Response:
+    if not api_key:
+        raise RuntimeError("Missing API key for the selected form.")
     headers = {
-        "Authorization": f"Token {KOBO_TOKEN}",
+        "Authorization": f"{auth_scheme} {api_key}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
     body = {"id": asset_uid, "submission": submission}
-    return requests.post(SUBMIT_URL, headers=headers, data=json.dumps(body), timeout=60)
+    return requests.post(submit_url, headers=headers, data=json.dumps(body), timeout=60)
 
 # -------------------------------
 # Load TblAttend
@@ -202,7 +213,7 @@ def build_submission(row: pd.Series) -> Dict[str, Any]:
             "oblast": None if pd.isna(row.get(H["oblast_parent"])) else str(row.get(H["oblast_parent"])).strip(),
             "rayon": None if pd.isna(row.get(H["rayon_parent"])) else str(row.get(H["rayon_parent"])).strip(),
             "hromada": None if pd.isna(row.get(H["hromada_parent"])) else str(row.get(H["hromada_parent"])).strip(),
-            "settlement": None,  # column not in template
+            "settlement": None,
             "facility_code": None if pd.isna(row.get(H["parent_pchf_name"])) else str(row.get(H["parent_pchf_name"])).strip(),
             "service_provider": None if pd.isna(row.get(H["ambulatory_name"])) else str(row.get(H["ambulatory_name"])).strip(),
             "helper": None if pd.isna(row.get(H["helper"])) else str(row.get(H["helper"])).strip(),
@@ -229,25 +240,20 @@ REQUIRED_COLS = [
     H["position"], H["oblast_parent"], H["rayon_parent"], H["hromada_parent"],
     H["score"], H["start_mm_yyyy"], H["end_mm_yyyy"], H["training_name"], H["place"]
 ]
-# helper & service_provider_other optional. settlement not in template.
-# Require at least one of Parent PCHF or Ambulatory
+
 def validate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     issues: List[Dict[str, Any]] = []
     for i, row in df.iterrows():
         errs: List[str] = []
-        # required columns
         for c in REQUIRED_COLS:
             if c not in df.columns or is_blank(row.get(c)):
                 errs.append(f"Missing: {c}")
-        # facility presence (PCHF or Ambulatory)
         if (H["parent_pchf_name"] in df.columns and is_blank(row.get(H["parent_pchf_name"]))) and \
            (H["ambulatory_name"] in df.columns and is_blank(row.get(H["ambulatory_name"]))):
             errs.append(f"Provide at least one of '{H['parent_pchf_name']}' or '{H['ambulatory_name']}'")
-        # score integer 0..100
         sv = row.get(H["score"]) if H["score"] in df.columns else None
         if parse_score_int(sv) is None:
             errs.append("Score must be a whole number 0–100")
-        # dates parseable
         for c in (H["start_mm_yyyy"], H["end_mm_yyyy"]):
             if not is_blank(row.get(c)) and parse_mm_yyyy_or_date(row.get(c)) is None:
                 errs.append(f"Invalid date in: {c} (use Excel date or mm/yyyy or dd-mm-yyyy)")
@@ -259,12 +265,33 @@ def validate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 # -------------------------------
 # UI
 # -------------------------------
-st.set_page_config(page_title="Kobo Uploader (EU)", page_icon="⬆️", layout="centered")
-st.title("⬆️ Excel → Kobo submission (EU)")
+st.set_page_config(page_title="Kobo Uploader", page_icon="⬆️", layout="centered")
+st.title("⬆️ Excel → Kobo submission")
 
 form_choice = st.selectbox("Destination form", list(FORMS.keys()))
-asset_uid = FORMS[form_choice]["asset_uid"]
-st.caption(f"Form: {FORMS[form_choice]['landing']}")
+cfg = FORMS[form_choice]
+
+asset_uid = cfg.get("asset_uid", "").strip()
+submit_url = (cfg.get("submit_url") or "").strip()
+api_key_env = cfg.get("api_key_env", "KOBO_TOKEN").strip()
+auth_scheme = (cfg.get("auth_scheme") or "Token").strip()
+api_key = get_secret(api_key_env, "").strip()
+
+if cfg.get("landing"):
+    st.caption(f"Form: {cfg['landing']}")
+st.caption(f"Submit URL: {submit_url or '—'}")
+st.caption(f"API key source: {api_key_env} ({'found' if api_key else 'missing'})")
+
+# Guardrails per selected form
+if not asset_uid:
+    st.error("Missing asset UID for the selected form. Set RUSLAN_ASSET_UID (for Ruslan) or check config.")
+    st.stop()
+if not submit_url:
+    st.error("Missing submit URL for the selected form. Set RUSLAN_SUBMIT_URL (for Ruslan) or check config.")
+    st.stop()
+if not api_key:
+    st.error(f"Missing API key for the selected form. Set '{api_key_env}' in your environment or Streamlit secrets.")
+    st.stop()
 
 uploaded = st.file_uploader("Upload UNICEF Attendance Sheet (.xlsx)", type=["xlsx"])
 
@@ -298,7 +325,7 @@ if uploaded:
 
         for i, sub in enumerate(submissions, start=1):
             try:
-                r = post_submission_json(asset_uid, sub)
+                r = post_submission_json(submit_url, api_key, auth_scheme, asset_uid, sub)
                 ok = r.status_code in (200, 201, 202)
                 data = r.json() if "application/json" in (r.headers.get("content-type","")) else {"status": r.status_code, "text": r.text[:800]}
             except Exception as e:
