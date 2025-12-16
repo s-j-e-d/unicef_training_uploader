@@ -194,15 +194,32 @@ def load_tbl_attend(file_like, sheet="Attend", table="TblAttend") -> pd.DataFram
     ws = wb[sheet]
     if table not in ws.tables:
         raise ValueError(f"Table '{table}' not found in sheet '{sheet}'")
+
     ref = ws.tables[table].ref
     min_col, min_row, max_col, max_row = range_boundaries(ref)
-    rows = list(ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col, values_only=True))
+    rows = list(
+        ws.iter_rows(
+            min_row=min_row, max_row=max_row,
+            min_col=min_col, max_col=max_col,
+            values_only=True
+        )
+    )
     if not rows:
         raise ValueError("TblAttend is empty")
+
     headers = [str(h).strip() if h is not None else "" for h in rows[0]]
     data = rows[1:]
-    df = pd.DataFrame(data, columns=headers).dropna(how="all")
+    df = pd.DataFrame(data, columns=headers)
+
+    # Drop rows that are truly empty (None/NaN) AND rows that are only whitespace strings
+    # 1) Normalize whitespace-only strings to NA
+    df = df.applymap(lambda x: None if isinstance(x, str) and x.strip() == "" else x)
+
+    # 2) Drop fully empty rows
+    df = df.dropna(how="all")
+
     return df
+
 
 # -------------------------------
 # Build one submission (nested exactly as schema)
