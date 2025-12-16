@@ -1,7 +1,18 @@
-@"
-.venv/
-.venv2/
+# Python
 __pycache__/
 *.pyc
-.vscode/
-"@ | Out-File -Encoding utf8 .gitignore
+
+# Excel outputs / templates
+*.xlsx
+*.xls
+
+# Data
+*.csv
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# OS / editor
+.DS_Store
+Thumbs.db
