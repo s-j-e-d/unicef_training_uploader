@@ -68,14 +68,14 @@ H = {
 
     "score": "Post-Training Test Score %",
 
-    # Optional (not mandatory anymore)
+    # These ARE mandatory (auto-fill) for any non-ignored row
     "start_mm_yyyy": "Training start date\n mm/yyyy",
     "end_mm_yyyy": "Training end date\n mm/yyyy",
     "training_name": "Name of Training",
     "place": "Place where the training is conducted",
 }
 
-# Kobo schema keys (kept as in your original; mapping below uses the new headers)
+# Kobo schema keys (retained)
 K = {
     "first_name": "personal_info/first_name",
     "second_name": "personal_info/second_name",
@@ -197,13 +197,7 @@ def load_tbl_attend(file_like, sheet="Attend", table="TblAttend") -> pd.DataFram
 
     ref = ws.tables[table].ref
     min_col, min_row, max_col, max_row = range_boundaries(ref)
-    rows = list(
-        ws.iter_rows(
-            min_row=min_row, max_row=max_row,
-            min_col=min_col, max_col=max_col,
-            values_only=True
-        )
-    )
+    rows = list(ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col, values_only=True))
     if not rows:
         raise ValueError("TblAttend is empty")
 
@@ -211,15 +205,104 @@ def load_tbl_attend(file_like, sheet="Attend", table="TblAttend") -> pd.DataFram
     data = rows[1:]
     df = pd.DataFrame(data, columns=headers)
 
-    # Drop rows that are truly empty (None/NaN) AND rows that are only whitespace strings
-    # 1) Normalize whitespace-only strings to NA
+    # Normalize whitespace-only strings to None so emptiness checks behave
     df = df.applymap(lambda x: None if isinstance(x, str) and x.strip() == "" else x)
 
-    # 2) Drop fully empty rows
+    # Drop rows that are fully empty across the whole table
     df = df.dropna(how="all")
 
     return df
 
+# -------------------------------
+# Minimal Validation
+# -------------------------------
+def is_blank(v: Any) -> bool:
+    if v is None:
+        return True
+    if isinstance(v, float) and pd.isna(v):
+        return True
+    s = str(v).strip()
+    return s == "" or s.lower() == "nan" or s == "NaT"
+
+# Fields that define whether a row is "empty enough to ignore"
+IGNORE_IF_ALL_EMPTY = [
+    H["first_name"],
+    H["second_name"],
+    H["phone"],
+    H["email"],
+    H["gender"],
+    H["works_hf"],
+    H["position"],
+    H["oblast_parent"],
+    H["rayon_parent"],
+    H["hromada_parent"],
+    H["settlement_parent"],
+    H["phcf_name"],
+    H["sdp_name"],
+    H["service_provider_other"],
+    H["score"],
+]
+
+def should_ignore_row(row: pd.Series) -> bool:
+    # Ignore only if ALL of the listed fields are blank/missing
+    for c in IGNORE_IF_ALL_EMPTY:
+        if c in row.index and not is_blank(row.get(c)):
+            return False
+    return True
+
+# Mandatory columns for any non-ignored row (includes training metadata)
+REQUIRED_COLS = [
+    # Person + location + score (mandatory)
+    H["first_name"],
+    H["second_name"],
+    H["phone"],
+    H["email"],
+    H["gender"],
+    H["works_hf"],
+    H["position"],
+    H["oblast_parent"],
+    H["rayon_parent"],
+    H["hromada_parent"],
+    H["settlement_parent"],
+    H["phcf_name"],
+    H["sdp_name"],
+    H["score"],
+
+    # Training metadata (mandatory)
+    H["start_mm_yyyy"],
+    H["end_mm_yyyy"],
+    H["training_name"],
+    H["place"],
+]
+
+def validate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    issues: List[Dict[str, Any]] = []
+    for i, row in df.iterrows():
+        # Ignore rows that are fully empty by the defined rule
+        if should_ignore_row(row):
+            continue
+
+        errs: List[str] = []
+
+        for c in REQUIRED_COLS:
+            if c not in df.columns or is_blank(row.get(c)):
+                errs.append(f"Missing: {c}")
+
+        # Score must parse to int 0–100 (only if row isn't ignored)
+        sv = row.get(H["score"]) if H["score"] in df.columns else None
+        if parse_score_int(sv) is None:
+            errs.append("Score must be a whole number 0–100")
+
+        # Dates must parse
+        for c in (H["start_mm_yyyy"], H["end_mm_yyyy"]):
+            if c in df.columns and not is_blank(row.get(c)) and parse_mm_yyyy_or_date(row.get(c)) is None:
+                errs.append(f"Invalid date in: {c} (use Excel date or mm/yyyy or dd-mm-yyyy)")
+
+        if errs:
+            issues.append({"Row #": i + 1, "Name": row.get(H["first_name"]), "Errors": "; ".join(errs)})
+
+    iss_df = pd.DataFrame(issues) if issues else pd.DataFrame(columns=["Row #", "Name", "Errors"])
+    return iss_df, len(issues)
 
 # -------------------------------
 # Build one submission (nested exactly as schema)
@@ -227,13 +310,10 @@ def load_tbl_attend(file_like, sheet="Attend", table="TblAttend") -> pd.DataFram
 def build_submission(row: pd.Series) -> Dict[str, Any]:
     sub = {
         "metadata": {
-            # Optional fields (kept if present)
-            "training_name": None if pd.isna(row.get(H["training_name"])) else str(row.get(H["training_name"])).strip()
-            if H.get("training_name") in row.index else None,
-            "start_date": parse_mm_yyyy_or_date(row.get(H["start_mm_yyyy"])) if H.get("start_mm_yyyy") in row.index else None,
-            "end_date": parse_mm_yyyy_or_date(row.get(H["end_mm_yyyy"])) if H.get("end_mm_yyyy") in row.index else None,
-            "place": None if pd.isna(row.get(H["place"])) else str(row.get(H["place"])).strip()
-            if H.get("place") in row.index else None,
+            "training_name": None if pd.isna(row.get(H["training_name"])) else str(row.get(H["training_name"])).strip(),
+            "start_date": parse_mm_yyyy_or_date(row.get(H["start_mm_yyyy"])),
+            "end_date": parse_mm_yyyy_or_date(row.get(H["end_mm_yyyy"])),
+            "place": None if pd.isna(row.get(H["place"])) else str(row.get(H["place"])).strip(),
         },
         "personal_info": {
             "first_name": None if pd.isna(row.get(H["first_name"])) else str(row.get(H["first_name"])).strip(),
@@ -249,7 +329,6 @@ def build_submission(row: pd.Series) -> Dict[str, Any]:
             "rayon": None if pd.isna(row.get(H["rayon_parent"])) else str(row.get(H["rayon_parent"])).strip(),
             "hromada": None if pd.isna(row.get(H["hromada_parent"])) else str(row.get(H["hromada_parent"])).strip(),
             "settlement": None if pd.isna(row.get(H["settlement_parent"])) else str(row.get(H["settlement_parent"])).strip(),
-            # keep your schema keys; map PHCF→facility_code and SDP→service_provider
             "facility_code": None if pd.isna(row.get(H["phcf_name"])) else str(row.get(H["phcf_name"])).strip(),
             "service_provider": None if pd.isna(row.get(H["sdp_name"])) else str(row.get(H["sdp_name"])).strip(),
             "service_provider_other": None if pd.isna(row.get(H["service_provider_other"])) else str(row.get(H["service_provider_other"])).strip(),
@@ -260,55 +339,6 @@ def build_submission(row: pd.Series) -> Dict[str, Any]:
         "meta": {"instanceID": f"uuid:{uuid.uuid4()}"},
     }
     return prune(sub)
-
-# -------------------------------
-# Minimal Validation (UPDATED mandatory set)
-# -------------------------------
-def is_blank(v: Any) -> bool:
-    if v is None:
-        return True
-    if isinstance(v, float) and pd.isna(v):
-        return True
-    s = str(v).strip()
-    return s == "" or s.lower() == "nan" or s == "NaT"
-
-# Mandatory columns exactly as requested
-REQUIRED_COLS = [
-    H["first_name"],
-    H["second_name"],
-    H["phone"],
-    H["email"],
-    H["gender"],
-    H["works_hf"],
-    H["position"],
-    H["oblast_parent"],
-    H["rayon_parent"],
-    H["hromada_parent"],
-    H["settlement_parent"],
-    H["phcf_name"],
-    H["sdp_name"],
-    H["score"],
-]
-
-def validate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    issues: List[Dict[str, Any]] = []
-    for i, row in df.iterrows():
-        errs: List[str] = []
-
-        for c in REQUIRED_COLS:
-            if c not in df.columns or is_blank(row.get(c)):
-                errs.append(f"Missing: {c}")
-
-        # Score must parse to int 0–100
-        sv = row.get(H["score"]) if H["score"] in df.columns else None
-        if parse_score_int(sv) is None:
-            errs.append("Score must be a whole number 0–100")
-
-        if errs:
-            issues.append({"Row #": i + 1, "Name": row.get(H["first_name"]), "Errors": "; ".join(errs)})
-
-    iss_df = pd.DataFrame(issues) if issues else pd.DataFrame(columns=["Row #", "Name", "Errors"])
-    return iss_df, len(issues)
 
 # -------------------------------
 # UI
@@ -361,10 +391,15 @@ if uploaded:
     else:
         st.success("Validation passed.")
 
-    submissions = [build_submission(row) for _, row in df.iterrows()]
+    # Build submissions, skipping ignored rows
+    submissions = [build_submission(row) for _, row in df.iterrows() if not should_ignore_row(row)]
     st.write(f"Prepared {len(submissions)} submission(s)")
 
     if st.button("🚀 Submit to Kobo", type="primary", use_container_width=True):
+        if not submissions:
+            st.warning("No non-empty rows to submit.")
+            st.stop()
+
         progress = st.progress(0)
         status = st.empty()
         succ, fail = 0, 0
