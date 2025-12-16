@@ -46,7 +46,7 @@ FORMS: Dict[str, Dict[str, Any]] = {
 
 # -------------------------------
 # EXACT column headers from TblAttend
-# (must match the Excel table headers exactly)
+# (NOTE: headers are normalized by collapsing ALL whitespace to single spaces)
 # -------------------------------
 H = {
     "first_name": "First Name",
@@ -54,8 +54,8 @@ H = {
     "phone": "Phone Number",
     "email": "Email",
     "gender": "Gender",
-    "works_hf": "Are you working in Health Facility (Yes or No) / \nМісце роботи - Заклад Охорони Здоров'я (Так чи ні)",
-    "position": "Position / \nПосада",
+    "works_hf": "Are you working in Health Facility (Yes or No) / Місце роботи - Заклад Охорони Здоров'я (Так чи ні)",
+    "position": "Position / Посада",
 
     "oblast_parent": "Oblast of Parent PHCF",
     "rayon_parent": "Rayon of Parent PHCF",
@@ -68,11 +68,11 @@ H = {
 
     "score": "Post-Training Test Score %",
 
-    # These ARE mandatory (auto-fill) for any non-ignored row
-    "start_mm_yyyy": "Training start date\n mm/yyyy",
-    "end_mm_yyyy": "Training end date\n mm/yyyy",
+    # Mandatory (auto-fill) for any non-ignored row:
+    "start_mm_yyyy": "Training start date mm/yyyy",
+    "end_mm_yyyy": "Training end date mm/yyyy",
     "training_name": "Name of Training",
-    "place": "Place where the training is conducted",
+    "place": "Training Location",
 }
 
 # Kobo schema keys (retained)
@@ -184,8 +184,13 @@ def post_submission_json(submit_url: str, api_key: str, auth_scheme: str, asset_
     return requests.post(submit_url, headers=headers, data=json.dumps(body), timeout=60)
 
 # -------------------------------
-# Load TblAttend
+# Load TblAttend (header-normalized)
 # -------------------------------
+def _norm_header(s: Any) -> str:
+    if s is None:
+        return ""
+    return " ".join(str(s).replace("\xa0", " ").split()).strip()
+
 def load_tbl_attend(file_like, sheet="Attend", table="TblAttend") -> pd.DataFrame:
     raw = file_like.read()
     wb = load_workbook(io.BytesIO(raw), data_only=True, read_only=False)
@@ -197,18 +202,24 @@ def load_tbl_attend(file_like, sheet="Attend", table="TblAttend") -> pd.DataFram
 
     ref = ws.tables[table].ref
     min_col, min_row, max_col, max_row = range_boundaries(ref)
-    rows = list(ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col, values_only=True))
+    rows = list(
+        ws.iter_rows(
+            min_row=min_row, max_row=max_row,
+            min_col=min_col, max_col=max_col,
+            values_only=True
+        )
+    )
     if not rows:
         raise ValueError("TblAttend is empty")
 
-    headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+    headers = [_norm_header(h) for h in rows[0]]
     data = rows[1:]
     df = pd.DataFrame(data, columns=headers)
 
-    # Normalize whitespace-only strings to None so emptiness checks behave
+    # Normalize whitespace-only strings to None
     df = df.applymap(lambda x: None if isinstance(x, str) and x.strip() == "" else x)
 
-    # Drop rows that are fully empty across the whole table
+    # Drop rows fully empty across all columns
     df = df.dropna(how="all")
 
     return df
@@ -224,7 +235,7 @@ def is_blank(v: Any) -> bool:
     s = str(v).strip()
     return s == "" or s.lower() == "nan" or s == "NaT"
 
-# Fields that define whether a row is "empty enough to ignore"
+# Ignore a row only if ALL of these fields are empty
 IGNORE_IF_ALL_EMPTY = [
     H["first_name"],
     H["second_name"],
@@ -252,7 +263,7 @@ def should_ignore_row(row: pd.Series) -> bool:
 
 # Mandatory columns for any non-ignored row (includes training metadata)
 REQUIRED_COLS = [
-    # Person + location + score (mandatory)
+    # Person + location + score
     H["first_name"],
     H["second_name"],
     H["phone"],
@@ -278,7 +289,6 @@ REQUIRED_COLS = [
 def validate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     issues: List[Dict[str, Any]] = []
     for i, row in df.iterrows():
-        # Ignore rows that are fully empty by the defined rule
         if should_ignore_row(row):
             continue
 
@@ -288,12 +298,10 @@ def validate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
             if c not in df.columns or is_blank(row.get(c)):
                 errs.append(f"Missing: {c}")
 
-        # Score must parse to int 0–100 (only if row isn't ignored)
         sv = row.get(H["score"]) if H["score"] in df.columns else None
         if parse_score_int(sv) is None:
             errs.append("Score must be a whole number 0–100")
 
-        # Dates must parse
         for c in (H["start_mm_yyyy"], H["end_mm_yyyy"]):
             if c in df.columns and not is_blank(row.get(c)) and parse_mm_yyyy_or_date(row.get(c)) is None:
                 errs.append(f"Invalid date in: {c} (use Excel date or mm/yyyy or dd-mm-yyyy)")
@@ -305,7 +313,7 @@ def validate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return iss_df, len(issues)
 
 # -------------------------------
-# Build one submission (nested exactly as schema)
+# Build one submission
 # -------------------------------
 def build_submission(row: pd.Series) -> Dict[str, Any]:
     sub = {
@@ -391,7 +399,6 @@ if uploaded:
     else:
         st.success("Validation passed.")
 
-    # Build submissions, skipping ignored rows
     submissions = [build_submission(row) for _, row in df.iterrows() if not should_ignore_row(row)]
     st.write(f"Prepared {len(submissions)} submission(s)")
 
