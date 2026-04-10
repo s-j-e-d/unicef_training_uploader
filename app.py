@@ -217,7 +217,7 @@ def load_tbl_attend(file_like, sheet="Attend", table="TblAttend") -> pd.DataFram
     df = pd.DataFrame(data, columns=headers)
 
     # Normalize whitespace-only strings to None
-    df = df.applymap(lambda x: None if isinstance(x, str) and x.strip() == "" else x)
+    df = df.map(lambda x: None if isinstance(x, str) and x.strip() == "" else x)
 
     # Drop rows fully empty across all columns
     df = df.dropna(how="all")
